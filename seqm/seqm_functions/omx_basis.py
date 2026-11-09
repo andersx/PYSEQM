@@ -34,6 +34,19 @@ _OM1_BASIS_RAW = {
         "cs": (-0.18850, 0.69800, 0.47427),
         "cp": (0.25667, 0.56013, 0.42139),
     },
+    # DUMMY OM2+d infrastructure bases for S/Cl (STO-3G-like sp; not production).
+    16: {
+        "shell_type": 1,
+        "exponents": (5.57912, 1.87408, 0.64648),
+        "cs": (-0.09997, 0.39951, 0.70012),
+        "cp": (0.15592, 0.60768, 0.39196),
+    },
+    17: {
+        "shell_type": 1,
+        "exponents": (6.36870, 2.12756, 0.73370),
+        "cs": (-0.09997, 0.39951, 0.70012),
+        "cp": (0.15592, 0.60768, 0.39196),
+    },
 }
 
 from .om1_ppecp_tables import (
@@ -152,7 +165,7 @@ def build_omx_basis_tables(atomic_numbers, method, dtype, device):
     real_atomic_numbers = [int(z) for z in torch.unique(atomic_numbers).tolist() if int(z) > 0]
     unsupported = sorted(z for z in real_atomic_numbers if z not in _OM1_BASIS_RAW)
     if unsupported:
-        raise ValueError(f"OMx basis only supports H/C/N/O/F; got atomic numbers {unsupported}")
+        raise ValueError(f"OMx basis only supports H/C/N/O/F/S/Cl; got atomic numbers {unsupported}")
 
     return _static_basis_tables(method == "OM1", dtype, device)
 
@@ -188,7 +201,7 @@ def gather_om1_basis(atomic_numbers, zeta, basis_tables):
     shell_type = basis_tables["shell_type"][atomic_numbers]
     if (shell_type < 0).any():
         unsupported = torch.unique(atomic_numbers[shell_type < 0]).detach().cpu().tolist()
-        raise ValueError(f"OMx basis only supports H/C/N/O/F; got atomic numbers {unsupported}")
+        raise ValueError(f"OMx basis only supports H/C/N/O/F/S/Cl; got atomic numbers {unsupported}")
 
     exponents = basis_tables["exponents"][atomic_numbers]
     coeff_s = basis_tables["coeff_s"][atomic_numbers]

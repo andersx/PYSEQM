@@ -19,6 +19,7 @@ from .seqm_functions.energy import (
 from .seqm_functions.excited_state_utils import _uniform_molecule_dimensions
 from .seqm_functions.nac import calc_nac
 from .seqm_functions.normal_modes import normal_modes
+from .seqm_functions.method_utils import has_d_orbitals, is_mndo_d, normalize_method
 from .seqm_functions.omx_utils import OMX_METHODS, build_beta_tensor, get_orbital_zetas, prepare_parameters
 from .seqm_functions.parameters import PWCCT, params
 from .seqm_functions.rcis_batch import calc_cis_energy, rcis_batch
@@ -67,9 +68,12 @@ parameterlist = {
     "OM2": [
         "U_ss",
         "U_pp",
+        "U_dd",
         "zeta",
+        "zeta_d",
         "beta_s",
         "beta_p",
+        "beta_d",
         "g_ss",
         "g_sp",
         "g_pp",
@@ -103,6 +107,12 @@ parameterlist = {
         "r0_1",
         "c6_2",
         "r0_2",
+        "F0SD",
+        "G2SD",
+        "rho_core",
+        "s_orb_exp_tail",
+        "p_orb_exp_tail",
+        "d_orb_exp_tail",
     ],
     "OM3": [
         "U_ss",
@@ -182,6 +192,29 @@ parameterlist = {
         "g_pp",
         "g_p2",
         "h_sp",
+        "alpha",
+    ],
+    "MNDO_d": [
+        "U_ss",
+        "U_pp",
+        "U_dd",
+        "zeta_s",
+        "zeta_p",
+        "zeta_d",
+        "beta_s",
+        "beta_p",
+        "beta_d",
+        "s_orb_exp_tail",
+        "p_orb_exp_tail",
+        "d_orb_exp_tail",
+        "g_ss",
+        "g_sp",
+        "g_pp",
+        "g_p2",
+        "h_sp",
+        "F0SD",
+        "G2SD",
+        "rho_core",
         "alpha",
     ],
     "PM3": [
@@ -348,7 +381,8 @@ class Parser(torch.nn.Module):
 
         Z = molecule.species.reshape(-1)[real_atoms]
 
-        if themethod == "PM6":  # PM6 is not implemented yet
+        themethod = normalize_method(themethod)
+        if themethod == "PM6":
             nHeavy = torch.sum(
                 (
                     (molecule.species > 1)
@@ -364,21 +398,46 @@ class Parser(torch.nn.Module):
                 ),
                 dim=1,
             )
+            nSuperHeavy = torch.sum(
+                (
+                    ((molecule.species > 12) & (molecule.species < 18))
+                    | ((molecule.species > 20) & (molecule.species < 30))
+                    | ((molecule.species > 32) & (molecule.species < 36))
+                    | ((molecule.species > 38) & (molecule.species < 48))
+                    | ((molecule.species > 50) & (molecule.species < 54))
+                    | ((molecule.species > 70) & (molecule.species < 80))
+                    | (molecule.species == 57)
+                ),
+                dim=1,
+            )
+        elif themethod == "MNDO_d":
+            # Thiel MNDO/d DORBS elements: Al–Cl, Br, I (9 AO); others with Z>1 are sp (4 AO).
+            is_d = (
+                ((molecule.species >= 13) & (molecule.species <= 17))
+                | (molecule.species == 35)
+                | (molecule.species == 53)
+            )
+            nSuperHeavy = torch.sum(is_d, dim=1)
+            nHeavy = torch.sum((molecule.species > 1) & (~is_d), dim=1)
+        elif themethod == "OM2":
+            # OM2+d infrastructure: S/Cl use 9 AO with dummy d-params; HCNOF stay 4 AO.
+            is_d = (molecule.species == 16) | (molecule.species == 17)
+            nSuperHeavy = torch.sum(is_d, dim=1)
+            nHeavy = torch.sum((molecule.species > 1) & (~is_d), dim=1)
         else:
             nHeavy = torch.sum(molecule.species > 1, dim=1)
-
-        nSuperHeavy = torch.sum(
-            (
-                ((molecule.species > 12) & (molecule.species < 18))
-                | ((molecule.species > 20) & (molecule.species < 30))
-                | ((molecule.species > 32) & (molecule.species < 36))
-                | ((molecule.species > 38) & (molecule.species < 48))
-                | ((molecule.species > 50) & (molecule.species < 54))
-                | ((molecule.species > 70) & (molecule.species < 80))
-                | (molecule.species == 57)
-            ),
-            dim=1,
-        )
+            nSuperHeavy = torch.sum(
+                (
+                    ((molecule.species > 12) & (molecule.species < 18))
+                    | ((molecule.species > 20) & (molecule.species < 30))
+                    | ((molecule.species > 32) & (molecule.species < 36))
+                    | ((molecule.species > 38) & (molecule.species < 48))
+                    | ((molecule.species > 50) & (molecule.species < 54))
+                    | ((molecule.species > 70) & (molecule.species < 80))
+                    | (molecule.species == 57)
+                ),
+                dim=1,
+            )
 
         nHydro = torch.sum(molecule.species == 1, dim=1)
         tore = molecule.const.tore
@@ -536,7 +595,8 @@ class Pack_Parameters(torch.nn.Module):
         super().__init__()
         self.elements = seqm_parameters["elements"]
         self.learned_list = seqm_parameters.get("learned", [])
-        self.method = seqm_parameters["method"]
+        self.method = normalize_method(seqm_parameters["method"])
+        seqm_parameters["method"] = self.method
         if self.method in OMX_METHODS:
             if {"zeta_s", "zeta_p"}.intersection(self.learned_list):
                 raise ValueError(
@@ -659,7 +719,8 @@ class Energy(torch.nn.Module):
         """
         super().__init__()
         self.seqm_parameters = seqm_parameters
-        self.method = seqm_parameters["method"]
+        self.method = normalize_method(seqm_parameters["method"])
+        seqm_parameters["method"] = self.method
         dispersion_kind(seqm_parameters)  # fail early on an unavailable correction
         self.parser = Parser(seqm_parameters)
         self.packpar = Pack_Parameters(seqm_parameters)
@@ -862,7 +923,7 @@ class Energy(torch.nn.Module):
         alpha = params["alpha"]
         if self.method in OMX_METHODS:
             return None
-        if self.method == "MNDO":
+        if self.method in ("MNDO", "MNDO_d"):
             return (alpha,)
         if self.method in ("AM1", "PM6", "PM6_SP", "PM6_SP_STAR"):
             K = torch.stack([params[f"Gaussian{i}_K"] for i in range(1, 5)], dim=1)
@@ -943,7 +1004,7 @@ class Energy(torch.nn.Module):
 
         params = molecule.parameters
         params["beta"] = build_beta_tensor(params, molecule.method)
-        if molecule.method != "PM6":
+        if not has_d_orbitals(molecule.method):
             prepare_parameters(
                 params,
                 molecule.method,
@@ -1080,8 +1141,13 @@ class Energy(torch.nn.Module):
             if molecule.const.do_timing:
                 t0 = time.time()
             with torch.no_grad():
-                use_fd_grad = molecule.method in {"OM1", "OM2", "OM3"} or (
-                    len(do_analytical_gradient) > 1 and do_analytical_gradient[1].lower() == "numerical"
+                use_fd_grad = (
+                    molecule.method in OMX_METHODS
+                    or has_d_orbitals(molecule.method)
+                    or (
+                        len(do_analytical_gradient) > 1
+                        and do_analytical_gradient[1].lower() == "numerical"
+                    )
                 )
                 if use_fd_grad:
                     grad_ground = scf_grad(
@@ -1142,7 +1208,7 @@ class Energy(torch.nn.Module):
                 molecule.const.timing["Force"].append(t1 - t0)
 
         # Calculate ground state molecular dipole
-        if molecule.method not in ("PM6",):  # Not yet implemented for PM6 d-orbitals
+        if not has_d_orbitals(molecule.method):  # Not yet implemented for spd bases
             with torch.no_grad():
                 calc_ground_dipole(molecule, P)
 

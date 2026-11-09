@@ -9,6 +9,7 @@ from .cal_par import AIJL, POIJ, additive_term_rho1, additive_term_rho2, dd_qq
 from .two_elec_two_center_int_local_frame import two_elec_two_center_int_local_frame as TETCILF
 from .two_elec_two_center_int_local_frame_d_orbitals import two_elec_two_center_int_local_frame_d_orbitals as TETCILFDO
 from .constants import ev
+from .method_utils import has_d_orbitals
 
 
 _PM6_D_PARAM_CACHE = {}
@@ -91,7 +92,7 @@ def _pm6_d_param_from_key(key):
         aij52 = AIJL(zetap, zetad, qn0, qn0 - 1, 1)
         aij43 = AIJL(zetas, zetad, qn0, qn0 - 1, 2)
         aij63 = AIJL(zetad, zetad, qn0 - 1, qn0 - 1, 2)
-    elif category == "B" and method == "PM6":
+    elif category == "B" and has_d_orbitals(method):
         ds_add = 0.2 * GetSlaterCondonParameter(
             2, qn0, zs, qn0, zd, qn0, zs, qn0, zd
         )
@@ -179,7 +180,7 @@ def two_elec_two_center_int(const,idxi, idxj, ni, nj, xij, rij, Z,
     dd4 = torch.zeros_like(qn0)
     dp3 = torch.zeros_like(qn0)
     mask_a = ((Z > 20) & (Z < 30)) | ((Z > 38) & (Z < 48)) | ((Z > 70) & (Z < 80)) | (Z == 57)
-    if themethod == "PM6":
+    if has_d_orbitals(themethod):
         mask_b = ((Z > 12) & (Z < 18)) | ((Z > 32) & (Z < 36)) | ((Z > 50) & (Z < 54))
     else:
         mask_b = torch.zeros_like(mask_a)
@@ -255,7 +256,7 @@ def two_elec_two_center_int(const,idxi, idxj, ni, nj, xij, rij, Z,
     
     rho_1[isX] = rho1(hsp[isX],dd[isX])
     rho_2[isX] = rho2(hpp[isX],qq[isX])
-    if themethod == "PM6":
+    if has_d_orbitals(themethod):
         rho_2d[isX] = POIJ(2,qq[isX]*math.sqrt(2),hppd[isX])
     ##rho_2[isX] = POIJ(2,qq[isX]*math.sqrt(2),hpp[isX])
 
@@ -375,7 +376,7 @@ def rotate(ni,nj,xij,rij,tore,da,db, qa,qb, dpa, dpb, dsa, dsb, dda, ddb, rho0a,
 
     e1b, e2a, wXH, w = w_withquaternion(None,tore,ni, nj, xij, riXH, ri, wHH)
 
-    if themethod == "PM6":
+    if has_d_orbitals(themethod):
         dRotationMatrix = GenerateRotationMatrix(xij)
 
         riYH, riYX, riYY, coreYH, coreYX, coreYY = \

@@ -20,6 +20,16 @@ from .hcore import hcore
 from .pack import pack, unpack
 from .packd import packd, unpackd
 from .SP2 import SP2
+from .method_utils import has_d_orbitals
+
+
+def _scf_uses_d(method, nSuperHeavy):
+    if has_d_orbitals(method):
+        return True
+    if method == "OM2" and nSuperHeavy is not None and bool((nSuperHeavy > 0).any().item()):
+        return True
+    return False
+
 
 # from .check import check
 
@@ -157,7 +167,7 @@ def build_fock(problem, configuration, density):
 def build_initial_density(molecule, M):
     """Construct the standard diagonal density-matrix guess when no guess is supplied."""
     nmol = molecule.nHeavy.shape[0]
-    num_orbitals = 9 if molecule.method == "PM6" else 4
+    num_orbitals = int(M.shape[-1])
     P0 = torch.zeros_like(M)
     tore_z = molecule.const.tore[molecule.Z].to(dtype=P0.dtype, device=P0.device)
     heavy = molecule.Z > 1
@@ -210,62 +220,62 @@ def make_scf_problem(molecule, M, w, W):
     )
 
 
+
 def make_density_builder(method, sp2, molsize, backward, scf_converger, openshell):
     """
     Returns a function Pnew = inner(F, nSH, nH, nHyd, nOcc) that
     applies exactly the right algorithm for your chosen flags.
     """
-    if openshell and method == "PM6":
+    if openshell and has_d_orbitals(method):
         raise ValueError("PM6 + open‐shell is not yet supported")
 
     if openshell and sp2[0]:
         raise ValueError("SP2 + open‐shell is not yet supported")
-    # 1) pick the “core” step function
+
+    use_d_method = has_d_orbitals(method) or method == "OM2"
+
     if sp2[0]:
-        # SP2-based
-        if method == "PM6":
-            packer = lambda F, nsh, nh, nhy: packd(F, nsh, nh, nhy)
-            unpacker = lambda D, nsh, nh, nhy: unpackd(D, nsh, nh, nhy, 9 * molsize)
-        else:
-            packer = lambda F, nh, nhy: pack(F, nh, nhy)
-            unpacker = lambda D, nh, nhy: unpack(D, nh, nhy, 4 * molsize)
+        packer_d = lambda F, nsh, nh, nhy: packd(F, nsh, nh, nhy)
+        unpacker_d = lambda D, nsh, nh, nhy: unpackd(D, nsh, nh, nhy, 9 * molsize)
+        packer_sp = lambda F, nh, nhy: pack(F, nh, nhy)
+        unpacker_sp = lambda D, nh, nhy: unpack(D, nh, nhy, 4 * molsize)
 
-        def core_step(F, nsh, nh, nhy, nOcc):
-            D = packer(F, *((nsh, nh, nhy) if method == "PM6" else (nh, nhy)))
+        def core_step_d(F, nsh, nh, nhy, nOcc):
+            D = packer_d(F, nsh, nh, nhy)
             D2 = SP2(D, nOcc, sp2[1])
-            return unpacker(D2, *((nsh, nh, nhy) if method == "PM6" else (nh, nhy)))
+            return unpacker_d(D2, nsh, nh, nhy)
 
+        def core_step_sp(F, nsh, nh, nhy, nOcc):
+            D = packer_sp(F, nh, nhy)
+            D2 = SP2(D, nOcc, sp2[1])
+            return unpacker_sp(D2, nh, nhy)
     else:
-        # diagonalization of symmetric Fock matrix
-        if method == "PM6":
-            core_step = lambda F, nsh, nh, nhy, nOcc: sym_eig_truncd(F, nsh, nh, nhy, nOcc)[1]
+        if backward:
+            core_step_d = lambda F, nsh, nh, nhy, nOcc: sym_eig_trunc1d(F, nsh, nh, nhy, nOcc)[1]
+            core_step_sp = lambda F, nsh, nh, nhy, nOcc: sym_eig_trunc1(F, nh, nhy, nOcc)[1]
         else:
+            core_step_d = lambda F, nsh, nh, nhy, nOcc: sym_eig_truncd(F, nsh, nh, nhy, nOcc)[1]
             if scf_converger and "T_el" in scf_converger:
-                core_step = lambda F, nsh, nh, nhy, nOcc: Fermi_Q(
+                core_step_sp = lambda F, nsh, nh, nhy, nOcc: Fermi_Q(
                     F, scf_converger[3], nOcc, nh, nhy, 8.61739e-5, False
                 )[0]
             else:
-                core_step = lambda F, nsh, nh, nhy, nOcc: sym_eig_trunc(F, nh, nhy, nOcc)[1]
+                core_step_sp = lambda F, nsh, nh, nhy, nOcc: sym_eig_trunc(F, nh, nhy, nOcc)[1]
 
-    # 2) if backward, override core_step entirely
-    if backward:
-        if method == "PM6":
-            core_step = lambda F, nsh, nh, nhy, nOcc: sym_eig_trunc1d(F, nsh, nh, nhy, nOcc)[1]
-        else:
-            core_step = lambda F, nsh, nh, nhy, nOcc: sym_eig_trunc1(F, nh, nhy, nOcc)[1]
-
-    # 3)  Expose a single "inner" that always accepts the same 5 args
     single_counts = None
 
     def inner(F, nSuperHeavy, nHeavy, nHydro, nOccMO):
         nonlocal single_counts
-        if method != "PM6" and not openshell and not backward and not sp2[0] and F.shape[0] == 1:
+        use_d = F.shape[-1] == 9 * molsize
+        if not use_d and not openshell and not backward and not sp2[0] and F.shape[0] == 1:
             if single_counts is None:
                 single_counts = tuple(int(x[0].item()) for x in (nHeavy, nHydro, nOccMO))
             nHeavy, nHydro, nOccMO = single_counts
-        return core_step(F, nSuperHeavy, nHeavy, nHydro, nOccMO)
+        step = core_step_d if use_d else core_step_sp
+        return step(F, nSuperHeavy, nHeavy, nHydro, nOccMO)
 
     return inner
+
 
 
 def measure_convergence(
@@ -315,7 +325,7 @@ def reshape_Hcore(M, nmol, molsize, method):
     Map packed per-atom M (nmol * molsize * molsize, norb, norb)
     to block molecular Hcore (nmol, norb*molsize, norb*molsize).
     """
-    num_orbitals = 9 if method == "PM6" else 4
+    num_orbitals = int(M.shape[-1])
     return (
         M.reshape(nmol, molsize, molsize, num_orbitals, num_orbitals)
         .transpose(2, 3)
@@ -707,7 +717,7 @@ def scf_forward2(problem, P, configuration, backward=False, verbose=True):
     alpha_direct = 0.7
 
     nAdapt = 0
-    num_orbitals = 9 if themethod == "PM6" else 4
+    num_orbitals = 9 if _scf_uses_d(themethod, nSuperHeavy) else 4
     nbas = molsize * num_orbitals
     notconverged = torch.ones(nmol, dtype=torch.bool, device=M.device)
     k = 0
@@ -1265,7 +1275,7 @@ def _scf_density_map(P, problem, configuration):
     Change the density builder here for any finite-temperature SCF modes.
     """
     F = build_fock(problem, configuration, P)
-    if configuration.method == "PM6":
+    if F.shape[-1] == 9 * problem.molsize:
         out = sym_eig_trunc1d(F, problem.nSuperHeavy, problem.nHeavy, problem.nHydro, problem.nOccMO)[1]
     else:
         out = sym_eig_trunc1(F, problem.nHeavy, problem.nHydro, problem.nOccMO)[1]
@@ -1486,7 +1496,7 @@ def orbital_charges(problem, configuration, orbitals):
     # It seems that orbital charges are the per atom molecular-orbital population
     return None
 
-    if configuration.method == "PM6":
+    if has_d_orbitals(configuration.method):
         return None
 
     nmol = problem.nmol
@@ -1536,12 +1546,13 @@ def final_orbital_analysis(problem, configuration, F, eig, scf_backward):
     if not eig:
         return None, None, None
 
+    use_d = F.shape[-1] == 9 * problem.molsize
     if scf_backward >= 1:
-        eigensolver = sym_eig_trunc1d if configuration.method == "PM6" else sym_eig_trunc1
+        eigensolver = sym_eig_trunc1d if use_d else sym_eig_trunc1
     else:
-        eigensolver = sym_eig_truncd if configuration.method == "PM6" else sym_eig_trunc
+        eigensolver = sym_eig_truncd if use_d else sym_eig_trunc
 
-    if configuration.method == "PM6":
+    if use_d:
         eigenvalues, orbitals = eigensolver(
             F, problem.nSuperHeavy, problem.nHeavy, problem.nHydro, problem.nOccMO, eig_only=True
         )
@@ -1677,22 +1688,10 @@ def scf_loop(
     unrestricted = molecule.nocc.dim() == 2
     if not torch.is_tensor(P):
         P = build_initial_density(molecule, M)
-    if molecule.method == "PM6":  # PM6 does not work. ignore this part
+    use_d_layout = int(M.shape[-1]) == 9
+    if use_d_layout:
         if unrestricted:  # open shell
-            raise NotImplementedError("PM6 UHF not implemented yet")
-            # W, W_exch = calc_integral_os(
-            #     molecule.parameters["s_orb_exp_tail"],
-            #     molecule.parameters["p_orb_exp_tail"],
-            #     molecule.parameters["d_orb_exp_tail"],
-            #     molecule.Z,
-            #     nmol * molecule.molsize * molecule.molsize,
-            #     molecule.maskd,
-            #     P,
-            #     molecule.parameters["F0SD"],
-            #     molecule.parameters["G2SD"],
-            # )
-            # W = torch.stack((W, W_exch))
-            # # print(W_exch)
+            raise NotImplementedError("spd UHF not implemented yet")
         else:
             W = calc_integral(
                 molecule.parameters["s_orb_exp_tail"],

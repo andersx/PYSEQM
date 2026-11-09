@@ -1,4 +1,5 @@
 import torch
+from .method_utils import has_d_orbitals
 
 from seqm.utils.torch_compile import optional_compile_function
 
@@ -180,11 +181,12 @@ def fock(
     """
     Construct the Fock matrix for either the default (4-basis) or PM6 (9-basis) method.
     """
-    if themethod != "PM6" and _fock_sp_dispatch is not None:
+    nbf = P0.shape[-1] // molsize
+    use_d = nbf == PM6_NBF
+    if not use_d and _fock_sp_dispatch is not None:
         return _fock_sp_dispatch(nmol, molsize, P0, M, maskd, mask, idxi, idxj, w, gss, gpp, gsp, gp2, hsp)
 
     # 1) reshape density into blocks of shape (nbf,nbf)
-    nbf = PM6_NBF if themethod == "PM6" else DEFAULT_NBF
     P = P0.view(nmol, molsize, nbf, molsize, nbf).transpose(2, 3).reshape(-1, nbf, nbf)
 
     # 2) start F with Hcore part
@@ -193,8 +195,8 @@ def fock(
     # 3) one-center (intra-atomic) ERI contributions
     F = _one_center(F, P, maskd, gss, gpp, gsp, gp2, hsp)
 
-    # 4) PM6 one-center ERI contributions from d-orbitals
-    if themethod == "PM6":
+    # 4) one-center ERI contributions from d-orbitals
+    if use_d and W is not None:
         F = _d_contrib_one_center(F, P, W, maskd)
 
     # 5) two-center (coulomb J & exchange K) neighbor-atom terms
@@ -335,7 +337,7 @@ def _two_center(F, P, w, maskd, mask, idxi, idxj, themethod):
     """
     Adds two-center (neighbor-atom) J and K contributions.
     """
-    if themethod != "PM6":
+    if P.shape[-1] != PM6_NBF:
         return _two_center_sp(F, P, w, maskd, mask, idxi, idxj)
 
     nbf = PM6_NBF

@@ -16,12 +16,15 @@ from .fock_u_batch import fock_u_batch
 from .hcore import hcore
 from .omx_utils import get_orbital_zetas
 from .pack import pack, unpack
+from .method_utils import has_d_orbitals
 
 CHECK_DEGENERACY = False
 
 
 def _initial_density_guess(molecule, tore, nmol):
-    orb_dim = 9 if molecule.method == "PM6" else 4
+    from .method_utils import molecule_uses_d_basis
+
+    orb_dim = 9 if molecule_uses_d_basis(molecule) else 4
     P0 = torch.zeros(
         molecule.nmol * molecule.molsize * molecule.molsize,
         orb_dim,
@@ -62,7 +65,7 @@ def make_dm_guess(
         learned_parameters = learned_parameters(molecule.species, molecule.coordinates)
     parameters, _, _ = packpar(molecule.Z, learned_params=learned_parameters)
 
-    if molecule.method == "PM6":
+    if has_d_orbitals(molecule.method):
         zetas = parameters["zeta_s"]
         zetap = parameters["zeta_p"]
         zetad = parameters["zeta_d"]
@@ -103,7 +106,7 @@ def make_dm_guess(
         if assignDM:
             molecule.dm = P
 
-    if molecule.method == "PM6":
+    if has_d_orbitals(molecule.method):
         if molecule.nocc.dim() == 2:  # open shell
             raise RuntimeError("Openshell PM6 not tested")
         else:

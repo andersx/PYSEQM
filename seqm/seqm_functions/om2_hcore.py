@@ -1,5 +1,6 @@
 import torch
 
+from .method_utils import molecule_uses_d_basis
 from .om1_overlap import (
     diatom_overlap_matrix_OM1,
     diatom_resonance_matrix_OM1,
@@ -18,18 +19,49 @@ _OMX_HCORE_CONFIG = {
 }
 
 
-def _build_cor_table(molecule, pair_core_semi, pi, pj):
+def _pad_sp_blocks_to_nbf(blocks_4, nbf):
+    """Embed (..., 4, 4) sp blocks into (..., nbf, nbf); d channels left zero."""
+    if nbf == 4:
+        return blocks_4
+    out = blocks_4.new_zeros(blocks_4.shape[:-2] + (nbf, nbf))
+    out[..., :4, :4] = blocks_4
+    return out
+
+
+def _embed_w_sp_to_spd(w_sp, nbf):
+    """
+    Embed OM2/OM1 packed sp two-electron integrals (10×10) into spd (45×45).
+    Indices among the first 4 AOs map onto the matching tril pairs of the 9-AO set.
+    """
+    if nbf == 4:
+        return w_sp
+    device, dtype = w_sp.device, w_sp.dtype
+    tril4 = torch.tril_indices(4, 4, offset=0, device=device)
+    tril9 = torch.tril_indices(nbf, nbf, offset=0, device=device)
+    # map each 4-AO tril pair to its index in the nbf tril list
+    key9 = tril9[0] * nbf + tril9[1]
+    key4 = tril4[0] * nbf + tril4[1]
+    # searchsorted requires sorted keys; tril_indices is row-major sorted for square
+    idx = torch.searchsorted(key9, key4)
+    npairs = w_sp.shape[0]
+    npack = tril9.shape[1]
+    w = w_sp.new_zeros((npairs, npack, npack))
+    w[:, idx[:, None], idx[None, :]] = w_sp
+    return w
+
+
+def _build_cor_table(molecule, pair_core_semi, pi, pj, nbf):
     nmol, molsize = molecule.species.shape
     dtype = molecule.coordinates.dtype
     device = molecule.coordinates.device
 
-    cor = torch.zeros((nmol, molsize * 4, molsize), dtype=dtype, device=device)
+    cor = torch.zeros((nmol, molsize * nbf, molsize), dtype=dtype, device=device)
 
     mol = molecule.pair_molid
     atom_i = molecule.maskd[molecule.idxi] % molsize
     atom_j = molecule.maskd[molecule.idxj] % molsize
-    row_i = atom_i * 4
-    row_j = atom_j * 4
+    row_i = atom_i * nbf
+    row_j = atom_j * nbf
 
     cor[mol, row_i + 0, atom_j] = pi["U_ss"] + pair_core_semi[:, 0, 0]
     cor[mol, row_j + 0, atom_i] = pj["U_ss"] + pair_core_semi[:, 0, 1]
@@ -39,19 +71,18 @@ def _build_cor_table(molecule, pair_core_semi, pi, pj):
         temp_i = (
             pi["U_pp"][heavy_i] + (pair_core_semi[heavy_i, 2, 0] + 2.0 * pair_core_semi[heavy_i, 3, 0]) / 3.0
         )
-        cor[mol[heavy_i], row_i[heavy_i] + 1, atom_j[heavy_i]] = temp_i
-        cor[mol[heavy_i], row_i[heavy_i] + 2, atom_j[heavy_i]] = temp_i
-        cor[mol[heavy_i], row_i[heavy_i] + 3, atom_j[heavy_i]] = temp_i
+        for o in (1, 2, 3):
+            cor[mol[heavy_i], row_i[heavy_i] + o, atom_j[heavy_i]] = temp_i
 
     heavy_j = molecule.nj > 1
     if heavy_j.any():
         temp_j = (
             pj["U_pp"][heavy_j] + (pair_core_semi[heavy_j, 2, 1] + 2.0 * pair_core_semi[heavy_j, 3, 1]) / 3.0
         )
-        cor[mol[heavy_j], row_j[heavy_j] + 1, atom_i[heavy_j]] = temp_j
-        cor[mol[heavy_j], row_j[heavy_j] + 2, atom_i[heavy_j]] = temp_j
-        cor[mol[heavy_j], row_j[heavy_j] + 3, atom_i[heavy_j]] = temp_j
+        for o in (1, 2, 3):
+            cor[mol[heavy_j], row_j[heavy_j] + o, atom_i[heavy_j]] = temp_j
 
+    # Dummy d Ort/COR channels: leave zero (documented DUMMY — not for production).
     return cor
 
 
@@ -93,56 +124,31 @@ def build_omx_pair_context(molecule, method, idxi, idxj, ni, nj, xij, rij):
     return context
 
 
-def _apply_omx_orthogonalization(molecule, H_blocks, S_blocks, B_blocks, pi, pj, pair_core_semi, use_cor):
-    S5 = S_blocks.reshape(molecule.nmol, molecule.molsize, molecule.molsize, 4, 4)
-    B5 = B_blocks.reshape(molecule.nmol, molecule.molsize, molecule.molsize, 4, 4)
+def _apply_omx_orthogonalization(molecule, H_blocks, S_blocks, B_blocks, pi, pj, pair_core_semi, use_cor, nbf):
+    S5 = S_blocks.reshape(molecule.nmol, molecule.molsize, molecule.molsize, nbf, nbf)
+    B5 = B_blocks.reshape(molecule.nmol, molecule.molsize, molecule.molsize, nbf, nbf)
     COR = None
     gval2 = None
     if use_cor:
         gval2 = (pi["gval2"], pj["gval2"])
-        COR = _build_cor_table(molecule, pair_core_semi, pi, pj)
-        # Save COR to use for gradients
+        COR = _build_cor_table(molecule, pair_core_semi, pi, pj, nbf)
         molecule.om2_COR = COR
-    _add_betor_cor_dense_(H_blocks, S5, B5, molecule, (pi["gval1"], pj["gval1"]), COR, gval2)
+    _add_betor_cor_dense_(H_blocks, S5, B5, molecule, (pi["gval1"], pj["gval1"]), COR, gval2, nbf)
 
 
-def _shell4_to_flat44(X):
-    """
-    X: [M, N, N, 4, 4] with indices [mol, atom_i, atom_k, orb_a, orb_c]
-    returns [M, 4N, 4N] with rows (atom_i, orb_a), cols (atom_k, orb_c)
-    """
+def _shell_to_flat(X, nbf):
+    """X: [M, N, N, nbf, nbf] -> [M, nbf*N, nbf*N]."""
     M, N = X.shape[:2]
-    return X.permute(0, 1, 3, 2, 4).reshape(M, 4 * N, 4 * N)
+    return X.permute(0, 1, 3, 2, 4).reshape(M, nbf * N, nbf * N)
 
 
-def _flat44_to_blocks(T, N):
-    """
-    T: [M, 4N, 4N]
-    returns [M, N, N, 4, 4] with [mol, atom_i, atom_j, orb_a, orb_b]
-    """
+def _flat_to_blocks(T, N, nbf):
+    """T: [M, nbf*N, nbf*N] -> [M, N, N, nbf, nbf]."""
     M = T.shape[0]
-    return T.reshape(M, N, 4, N, 4).permute(0, 1, 3, 2, 4)
+    return T.reshape(M, N, nbf, N, nbf).permute(0, 1, 3, 2, 4)
 
 
-def _add_betor_cor_dense_(out_blocks, S5, B5, molecule, gval1, COR, gval2):
-    """
-    Dense GEMM implementation of full BETOR with COR.
-
-    Equivalent target form:
-
-        T1 = S @ B.T + B @ S.T
-
-        D[i,k,a,c] = S[i,k,a,c] * (H[i,k,a] - C[k,i,c])
-        T2 = D @ S.T + S @ D.T
-
-        H += -ft1 * T1 + ft2 * T2
-
-    S5/B5: [nmol, molsize, molsize, 4, 4]
-    COR:   same layout expected by existing code:
-           COR[:, 0::4, :] -> s correction, [M, N, N]
-           COR[:, 1::4, :] -> p correction, [M, N, N]
-    """
-
+def _add_betor_cor_dense_(out_blocks, S5, B5, molecule, gval1, COR, gval2, nbf):
     M, N = S5.shape[:2]
     dtype = S5.dtype
 
@@ -151,18 +157,12 @@ def _add_betor_cor_dense_(out_blocks, S5, B5, molecule, gval1, COR, gval2):
     ai = (mask // N) % N
     aj = mask % N
 
-    # ---------------------------------------------------------------------
-    # BETOR3-like part:
-    # T1[i,j,a,b] = sum_kc S[i,k,a,c] B[j,k,b,c]
-    #             + sum_kc B[i,k,a,c] S[j,k,b,c]
-    # ---------------------------------------------------------------------
-    S2 = _shell4_to_flat44(S5)  # [M, 4N, 4N]
-    B2 = _shell4_to_flat44(B5)  # [M, 4N, 4N]
+    S2 = _shell_to_flat(S5, nbf)
+    B2 = _shell_to_flat(B5, nbf)
 
     T1_flat = torch.bmm(S2, B2.transpose(1, 2))
     T1_flat += torch.bmm(B2, S2.transpose(1, 2))
-
-    T1 = _flat44_to_blocks(T1_flat, N)
+    T1 = _flat_to_blocks(T1_flat, N, nbf)
 
     ft1 = 0.25 * (gval1[0] + gval1[1])
     hsrc = -ft1[:, None, None] * T1[mol, ai, aj]
@@ -171,48 +171,95 @@ def _add_betor_cor_dense_(out_blocks, S5, B5, molecule, gval1, COR, gval2):
         out_blocks.index_add_(0, molecule.mask, hsrc)
         return
 
-    # ---------------------------------------------------------------------
-    # COR part:
-    #
-    # Original pair expression:
-    #   sum_kc S[i,k,a,c] S[j,k,b,c]
-    #       * (hi[i,k,a] + hj[j,k,b] - hk[k,i,j,c])
-    #
-    # This can be written as:
-    #   D @ S.T + S @ D.T
-    # where:
-    #   D[i,k,a,c] = S[i,k,a,c] * (Hrow[i,k,a] - Ccol[i,k,c])
-    # Hrow is the row-atom correction.
-    # Ccol is the k-atom correction transposed into the contraction orbital.
-    # ---------------------------------------------------------------------
-    CORs = COR[:, 0::4, :]  # [M, N, N]
-    CORp = COR[:, 1::4, :]  # [M, N, N]
+    CORs = COR[:, 0::nbf, :]
+    CORp = COR[:, 1::nbf, :]
 
-    heavy = (molecule.species > 1).to(dtype)  # [M, N]
+    heavy = (molecule.species > 1).to(dtype)
 
-    Hrow = S5.new_zeros((M, N, N, 4))
+    Hrow = S5.new_zeros((M, N, N, nbf))
     Hrow[..., 0] = CORs
-    Hrow[..., 1:] = CORp[..., None] * heavy[:, :, None, None]
+    Hrow[..., 1:4] = CORp[..., None] * heavy[:, :, None, None]
+    # d Ort factors left at 0 (dummy)
 
-    Ccol = S5.new_zeros((M, N, N, 4))
+    Ccol = S5.new_zeros((M, N, N, nbf))
     Ccol[..., 0] = CORs.transpose(1, 2)
-    Ccol[..., 1:] = CORp.transpose(1, 2)[..., None] * heavy[:, None, :, None]
+    Ccol[..., 1:4] = CORp.transpose(1, 2)[..., None] * heavy[:, None, :, None]
 
-    # D: [M, N, N, 4, 4]
-    # D[m,i,k,a,c] = S[m,i,k,a,c] * (Hrow[m,i,k,a] - Ccol[m,i,k,c])
     D = S5 * (Hrow.unsqueeze(-1) - Ccol.unsqueeze(-2))
-
-    D2 = _shell4_to_flat44(D)
+    D2 = _shell_to_flat(D, nbf)
 
     T2_flat = torch.bmm(D2, S2.transpose(1, 2))
     T2_flat += torch.bmm(S2, D2.transpose(1, 2))
-
-    T2 = _flat44_to_blocks(T2_flat, N)
+    T2 = _flat_to_blocks(T2_flat, N, nbf)
 
     ft2 = 0.0625 * (gval2[0] + gval2[1])
     hsrc = hsrc + ft2[:, None, None] * T2[mol, ai, aj]
 
     out_blocks.index_add_(0, mask, hsrc)
+
+
+def _fill_dummy_d_channels(molecule, H_blocks, S_blocks, B_blocks, pair_overlap, pair_resonance, nbf):
+    """
+    Fill s/p–d and d–d one-electron channels with dummy ζ_d / β_d overlaps.
+    DUMMY — not for production chemistry.
+    """
+    if nbf < 9:
+        return
+    from .diat_overlapD import diatom_overlap_matrixD
+    from .omx_utils import get_orbital_zeta_tensor
+
+    # Only needed when dummy zeta_d / beta_d are present.
+    params = molecule.parameters
+    if "zeta_d" not in params or "beta_d" not in params:
+        return
+    if not bool((params["zeta_d"].abs() > 0).any().item()):
+        return
+
+    # OM2 stores a single ζ for s/p; build (natoms, 3) = (ζ, ζ, ζ_d) for d-overlap.
+    if molecule.method in {"OM1", "OM2", "OM3"}:
+        z = params["zeta"]
+        zd = params.get("zeta_d", torch.zeros_like(z))
+        zeta = torch.stack([z, z, zd], dim=1)
+    else:
+        zeta = get_orbital_zeta_tensor(params, molecule.method, include_d=True)
+        if zeta.dim() == 1:
+            return
+        if zeta.shape[-1] < 3:
+            zeta = torch.nn.functional.pad(zeta, (0, 3 - zeta.shape[-1]))
+
+    idxi, idxj = molecule.idxi, molecule.idxj
+    ni, nj = molecule.ni, molecule.nj
+    xij, rij = molecule.xij, molecule.rij
+    qn = molecule.const.qn_int
+    qnD = molecule.const.qnD_int
+
+    di = diatom_overlap_matrixD(ni, nj, xij, rij, zeta[idxi], zeta[idxj], qn, qnD)
+    # Resonance ≈ 0.5 (βμ+βν) Sμν using beta_s/p/d
+    beta = params["beta"]
+    if beta.shape[-1] < 3:
+        beta = torch.nn.functional.pad(beta, (0, 3 - beta.shape[-1]))
+    layout = [0, 1, 1, 1, 2, 2, 2, 2, 2]
+    bi = beta[idxi][:, layout]
+    bj = beta[idxj][:, layout]
+    bsum = 0.5 * (bi.unsqueeze(2) + bj.unsqueeze(1))
+    res = di * bsum
+
+    # Only write d-involving blocks; keep existing OM2 sp block.
+    d_slice = slice(4, 9)
+    H_blocks[molecule.mask, d_slice, :] = res[:, d_slice, :]
+    H_blocks[molecule.mask, :, d_slice] = res[:, :, d_slice]
+    H_blocks[molecule.mask, :4, :4] = pair_resonance  # restore OM2 sp resonance
+
+    if S_blocks is not None:
+        S_blocks[molecule.mask, d_slice, :] = di[:, d_slice, :]
+        S_blocks[molecule.mask, :, d_slice] = di[:, :, d_slice]
+        S_blocks[molecule.mask, :4, :4] = pair_overlap
+        S_blocks[molecule.mask_l] = S_blocks[molecule.mask].transpose(-1, -2)
+    if B_blocks is not None:
+        B_blocks[molecule.mask, d_slice, :] = res[:, d_slice, :]
+        B_blocks[molecule.mask, :, d_slice] = res[:, :, d_slice]
+        B_blocks[molecule.mask, :4, :4] = pair_resonance
+        B_blocks[molecule.mask_l] = B_blocks[molecule.mask].transpose(-1, -2)
 
 
 def build_omx_hcore(molecule):
@@ -221,11 +268,12 @@ def build_omx_hcore(molecule):
     use_cor = cfg["use_cor"]
     direct_resonance = cfg["direct_resonance"]
 
-    orb_dim = 4
+    use_d = molecule_uses_d_basis(molecule)
+    nbf = 9 if use_d else 4
     device = molecule.coordinates.device
     dtype = molecule.coordinates.dtype
     nblocks = molecule.nmol * molecule.molsize * molecule.molsize
-    H_blocks = torch.zeros((nblocks, orb_dim, orb_dim), dtype=dtype, device=device)
+    H_blocks = torch.zeros((nblocks, nbf, nbf), dtype=dtype, device=device)
 
     context = build_omx_pair_context(
         molecule, method, molecule.idxi, molecule.idxj, molecule.ni, molecule.nj, molecule.xij, molecule.rij
@@ -233,28 +281,43 @@ def build_omx_hcore(molecule):
     pi, pj = omx_pair_params(molecule.parameters, molecule.idxi, molecule.idxj)
     pair_data = context["pair"]
 
-    for orb, key in enumerate(["U_ss", "U_pp", "U_pp", "U_pp"]):
-        H_blocks[molecule.maskd, orb, orb] = molecule.parameters[key].to(
-            dtype=H_blocks.dtype, device=H_blocks.device
-        )
-    H_blocks.index_add_(0, molecule.maskd[molecule.idxi], pair_data["e1b"])
-    H_blocks.index_add_(0, molecule.maskd[molecule.idxj], pair_data["e2a"])
+    # One-center U (sp always; dummy U_dd when present)
+    H_blocks[molecule.maskd, 0, 0] = molecule.parameters["U_ss"].to(dtype=dtype, device=device)
+    for orb in (1, 2, 3):
+        H_blocks[molecule.maskd, orb, orb] = molecule.parameters["U_pp"].to(dtype=dtype, device=device)
+    if use_d and "U_dd" in molecule.parameters:
+        for orb in range(4, 9):
+            H_blocks[molecule.maskd, orb, orb] = molecule.parameters["U_dd"].to(dtype=dtype, device=device)
+
+    e1b = _pad_sp_blocks_to_nbf(pair_data["e1b"], nbf)
+    e2a = _pad_sp_blocks_to_nbf(pair_data["e2a"], nbf)
+    H_blocks.index_add_(0, molecule.maskd[molecule.idxi], e1b)
+    H_blocks.index_add_(0, molecule.maskd[molecule.idxj], e2a)
 
     pair_resonance = context["pair_resonance"]
-    H_blocks[molecule.mask] = pair_resonance
+    H_blocks[molecule.mask, :4, :4] = pair_resonance
+
+    w = _embed_w_sp_to_spd(pair_data["w"], nbf)
 
     if direct_resonance or molecule.molsize < 3:
-        return H_blocks, pair_data["w"], pair_data["fko"], None, None, None
+        if use_d:
+            _fill_dummy_d_channels(molecule, H_blocks, None, None, None, pair_resonance, nbf)
+        return H_blocks, w, pair_data["fko"], None, None, None
 
     pair_overlap = context["pair_overlap"]
     S_blocks = torch.zeros_like(H_blocks)
     B_blocks = torch.zeros_like(H_blocks)
-    S_blocks[molecule.mask] = pair_overlap
-    S_blocks[molecule.mask_l] = pair_overlap.transpose(-1, -2)
-    B_blocks[molecule.mask] = pair_resonance
-    B_blocks[molecule.mask_l] = pair_resonance.transpose(-1, -2)
+    S_blocks[molecule.mask, :4, :4] = pair_overlap
+    S_blocks[molecule.mask_l, :4, :4] = pair_overlap.transpose(-1, -2)
+    B_blocks[molecule.mask, :4, :4] = pair_resonance
+    B_blocks[molecule.mask_l, :4, :4] = pair_resonance.transpose(-1, -2)
+
+    if use_d:
+        _fill_dummy_d_channels(
+            molecule, H_blocks, S_blocks, B_blocks, pair_overlap, pair_resonance, nbf
+        )
 
     _apply_omx_orthogonalization(
-        molecule, H_blocks, S_blocks, B_blocks, pi, pj, pair_data.get("core_semi"), use_cor
+        molecule, H_blocks, S_blocks, B_blocks, pi, pj, pair_data.get("core_semi"), use_cor, nbf
     )
-    return H_blocks, pair_data["w"], pair_data["fko"], None, None, None
+    return H_blocks, w, pair_data["fko"], None, None, None

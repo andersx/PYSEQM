@@ -1,5 +1,6 @@
 import torch
 
+from .method_utils import has_d_orbitals
 from .fock import (
     DEFAULT_NBF,
     PM6_FLOCAL_MAP,
@@ -56,7 +57,7 @@ def fock_u_batch(
     gss, gpp, gsp, shape (ntotatoms, )
     P0: shape (nmol, 4*molsize, 4*molsize)
     """
-    nbf = PM6_NBF if themethod == "PM6" else DEFAULT_NBF
+    nbf = PM6_NBF if has_d_orbitals(themethod) else DEFAULT_NBF
     P_tot = (
         (P0[:, 0] + P0[:, 1])
         .reshape((nmol, molsize, nbf, molsize, nbf))
@@ -77,7 +78,7 @@ def fock_u_batch(
     F_ = _one_center_u(F_, P_tot, P_spin, maskd, gss, gpp, gsp, gp2, hsp)
 
     # PM6 one-center ERI contributions from d-orbitals
-    if themethod == "PM6":
+    if has_d_orbitals(themethod):
         F_ = _d_contrib_one_center_u(F_, P_tot, P_spin, W, maskd)
 
     # 5) two-center (coulomb J & exchange K) neighbor-atom terms
@@ -203,7 +204,7 @@ def _two_center_u(F, P_tot, P_spin, w, maskd, mask, idxi, idxj, themethod):
     Returns: F updated in‐place with J/K for both α and β channels.
     """
     # pick basis‐size‐dependent parameters
-    if themethod == "PM6":
+    if has_d_orbitals(themethod):
         nbf = PM6_NBF
         tril_idx = _cached_index(TRIL_IDX_9, F.device)
         weight_tc = _cached_tensor(WEIGHT_45, F.device, F.dtype)
@@ -215,7 +216,7 @@ def _two_center_u(F, P_tot, P_spin, w, maskd, mask, idxi, idxj, themethod):
     i0, i1 = tril_idx
 
     # neighbor‐pair ordering: A and B centers
-    idxA, idxB = (idxj, idxi) if themethod == "PM6" else (idxi, idxj)
+    idxA, idxB = (idxj, idxi) if has_d_orbitals(themethod) else (idxi, idxj)
 
     # ——— Coulomb (J) ———
     # pack P_tot for A and B blocks
@@ -241,7 +242,7 @@ def _two_center_u(F, P_tot, P_spin, w, maskd, mask, idxi, idxj, themethod):
 
     # ——— Exchange (K) ———
     # prepare indirect indexing
-    ind = _cached_index(K_ind_9 if themethod == "PM6" else K_ind_4, F.device)
+    ind = _cached_index(K_ind_9 if has_d_orbitals(themethod) else K_ind_4, F.device)
     p_idx = ind.view(-1)  # (nbf*nbf,)
     w1 = w[:, p_idx, :].view(B, nbf, nbf, -1)
 
@@ -250,13 +251,13 @@ def _two_center_u(F, P_tot, P_spin, w, maskd, mask, idxi, idxj, themethod):
     Pp = -P_spin[:, mask]  # (nExPairs, nbf, nbf)
     Ksum = torch.zeros(2, B, nbf, nbf, device=F.device, dtype=F.dtype)
 
-    if themethod == "PM6":
+    if has_d_orbitals(themethod):
         Pp = Pp.transpose(2, 3)  # align for d‐orbitals
 
     for j in range(nbf):
         w2 = w1[..., ind[j]]
         k_block = (w2 * Pp.unsqueeze(2)).sum(dim=(3, 4))
-        if themethod == "PM6":
+        if has_d_orbitals(themethod):
             Ksum[..., j, :] = k_block
         else:
             Ksum[..., :, j] = k_block
@@ -311,7 +312,7 @@ def old_fock_u_batch(
     dtype = M.dtype
     device = M.device
 
-    if themethod == "PM6":
+    if has_d_orbitals(themethod):
         P = (
             (P0[:, 0] + P0[:, 1])
             .reshape((nmol, molsize, 9, molsize, 9))
@@ -367,7 +368,7 @@ def old_fock_u_batch(
     #
     """
     ### http://openmopac.net/manual/1c2e.html
-    if themethod == "PM6":
+    if has_d_orbitals(themethod):
         # (s,s)
         TMP_ = torch.zeros_like(F_)
         size = nmol * molsize * molsize
@@ -1102,7 +1103,7 @@ def old_fock_u_batch(
     # weight for them are
     #  1       2       1        2        2        1        2       2        2       1
 
-    if themethod == "PM6":
+    if has_d_orbitals(themethod):
         weight = torch.tensor(
             [
                 1.0,
@@ -1165,7 +1166,7 @@ def old_fock_u_batch(
 
     # take out the upper triangle part in the same order as in W
     # shape (nparis, 10)
-    if themethod == "PM6":
+    if has_d_orbitals(themethod):
         PA = (
             P[maskd[idxj]][
                 ...,
@@ -1388,7 +1389,7 @@ def old_fock_u_batch(
     del PA, PB
 
     # $$$ Why in pm6 (0, maskd[idxi], sumA) but in pm3 (0, maskd[idxj], sumA) ??????
-    if themethod == "PM6":
+    if has_d_orbitals(themethod):
         sumA = torch.zeros(w.shape[0], 9, 9, dtype=dtype, device=device)
         sumB = torch.zeros_like(sumA)
         sumA[
@@ -1617,14 +1618,14 @@ def old_fock_u_batch(
     # lambda, sigma in B
     # F_mu_lambda = Hcore - 0.5* \sum_{nu \in A} \sum_{sigma in B} P_{nu, sigma} * (mu nu, lambda, sigma)
 
-    if themethod == "PM6":
+    if has_d_orbitals(themethod):
         sum_ = torch.zeros(2, w.shape[0], 9, 9, dtype=dtype, device=device)
     else:
         sum_ = torch.zeros(2, w.shape[0], 4, 4, dtype=dtype, device=device)
 
     # (ss ), (px s), (px px), (py s), (py px), (py py), (pz s), (pz px), (pz py), (pz pz)
     #   0,     1         2       3       4         5       6      7         8        9
-    if themethod == "PM6":
+    if has_d_orbitals(themethod):
         ind = torch.tensor(
             [
                 [0, 1, 3, 6, 10, 15, 21, 28, 36],
@@ -1646,7 +1647,7 @@ def old_fock_u_batch(
         )
 
     # Pp =P[mask], P_{mu \in A, lambda \in B}
-    if themethod == "PM6":
+    if has_d_orbitals(themethod):
         for i in range(9):
             for j in range(9):
                 # \sum_{nu \in A} \sum_{sigma \in B} P_{nu, sigma} * (mu nu, lambda, sigma)
@@ -1666,7 +1667,7 @@ def old_fock_u_batch(
 
     ####################
 
-    if themethod == "PM6":
+    if has_d_orbitals(themethod):
         F0_ = (
             F_.reshape(2, nmol, molsize, molsize, 9, 9)
             .transpose(3, 4)

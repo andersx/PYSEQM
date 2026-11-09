@@ -118,7 +118,7 @@ def pair_nuclear_energy(
     tmp = torch.exp(-alpha[idxi] * rija)
     t2 = torch.where(XH, tmp * rija, tmp)
     t3 = torch.exp(-alpha[idxj] * rija)
-    if method == "MNDO":
+    if method in {"MNDO", "MNDO_d"}:
         # in mopac, rij is in unit of angstrom
         # EnucAB = torch.abs(t1*(1.0+t2+t3))
         EnucAB = t1 * (1.0 + t2 + t3)
@@ -172,7 +172,9 @@ def pair_nuclear_energy(
 
         EnucAB = expo2 + t4 * (t5 + t6)
     else:
-        raise ValueError("Supported Method: MNDO, AM1, PM3, PM6, PM6_SP, PM6_SP_STAR, OM1, OM2, OM3")
+        raise ValueError(
+            "Supported Method: MNDO, MNDO_d, AM1, PM3, PM6, PM6_SP, PM6_SP_STAR, OM1, OM2, OM3"
+        )
     return EnucAB
 
 

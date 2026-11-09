@@ -1,5 +1,6 @@
 import torch
 
+from .method_utils import has_d_orbitals
 from .omx_basis import build_om1_basis_payload, build_omx_basis_tables
 
 OMX_METHODS = {"OM1", "OM2", "OM3"}
@@ -27,7 +28,7 @@ def get_orbital_zetas(parameters, method):
 
 def build_beta_tensor(parameters, method):
     fields = ["beta_s", "beta_p"]
-    if method == "PM6":
+    if has_d_orbitals(method) or "beta_d" in parameters:
         fields.append("beta_d")
     return torch.stack([parameters[field] for field in fields], dim=1)
 
@@ -41,6 +42,20 @@ def prepare_parameters(parameters, method, atomic_numbers, *, dtype, device):
     """
     Apply the OMx-specific derived-parameter setup in one place.
     """
+    # Preserve OM2+d dummy d-params already loaded from CSV.
+    _d_keys = (
+        "zeta_d",
+        "U_dd",
+        "beta_d",
+        "F0SD",
+        "G2SD",
+        "rho_core",
+        "s_orb_exp_tail",
+        "p_orb_exp_tail",
+        "d_orb_exp_tail",
+    )
+    keep_d = {k: parameters[k] for k in _d_keys if k in parameters}
+
     if method in OMX_METHODS:
         zeros_zeta = torch.zeros_like(parameters["zeta"])
         parameters["_omx_basis"] = build_omx_basis_tables(atomic_numbers, method, dtype=dtype, device=device)
@@ -60,3 +75,5 @@ def prepare_parameters(parameters, method, atomic_numbers, *, dtype, device):
     parameters["F0SD"] = zeros_uss.clone()
     parameters["G2SD"] = zeros_uss.clone()
     parameters["rho_core"] = zeros_uss.clone()
+    if method == "OM2":
+        parameters.update(keep_d)

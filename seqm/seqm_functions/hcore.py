@@ -2,6 +2,7 @@ import torch
 
 from .constants import overlap_cutoff
 from .diat_overlap_PM6_SP import diatom_overlap_matrix_PM6_SP
+from .method_utils import has_d_orbitals
 from .diat_overlapD import diatom_overlap_matrixD
 from .om1_overlap import diatom_overlap_matrix_OM1
 from .om2_hcore import build_omx_hcore
@@ -66,7 +67,7 @@ def hcore(molecule, doTETCI=True):
     if is_omx:
         return build_omx_hcore(molecule)
 
-    is_pm6 = molecule.method == "PM6"
+    is_pm6 = has_d_orbitals(molecule.method)
     orb_dim = 9 if is_pm6 else 4
     if is_pm6:
         overlap_fn = diatom_overlap_matrixD
@@ -325,7 +326,7 @@ def overlap_matrix_current_geometry(molecule):
 
 
 def _overlap_kernel_data(molecule):
-    is_pm6 = molecule.method == "PM6"
+    is_pm6 = has_d_orbitals(molecule.method)
     is_omx = molecule.method in {"OM1", "OM2", "OM3"}
     orb_dim = 9 if is_pm6 else 4
 

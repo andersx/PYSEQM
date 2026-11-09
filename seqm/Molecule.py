@@ -4,6 +4,7 @@ import torch
 
 from seqm.basics import *  # noqa: F403
 from .basics import Pack_Parameters, Parser
+from .seqm_functions.method_utils import has_d_orbitals, normalize_method
 from .seqm_functions.omx_utils import build_beta_tensor, prepare_parameters
 
 
@@ -50,7 +51,8 @@ class Molecule(torch.nn.Module):
         if seqm_parameters.get("elements") is None:
             seqm_parameters["elements"] = [0] + sorted(set(species.reshape(-1).tolist()))
         self.seqm_parameters = seqm_parameters
-        self.method = seqm_parameters["method"]
+        self.method = normalize_method(seqm_parameters["method"])
+        seqm_parameters["method"] = self.method
 
         self.parser = Parser(self.seqm_parameters)
         self.packpar = Pack_Parameters(self.seqm_parameters).to(coordinates.device)
@@ -89,10 +91,15 @@ class Molecule(torch.nn.Module):
         self.parameters, self.alp, self.chi = self.packpar(self.Z, learned_params=learned_params)
         self._default_parameters = not callable(learned_parameters) and not learned_params
 
-        self.norb = self.nHydro + 4 * self.nHeavy  # number of orbitals
+        if has_d_orbitals(self.method) or (
+            self.method == "OM2" and bool((self.nSuperHeavy > 0).any().item())
+        ):
+            self.norb = self.nHydro + 4 * self.nHeavy + 9 * self.nSuperHeavy
+        else:
+            self.norb = self.nHydro + 4 * self.nHeavy
 
         self.parameters["beta"] = build_beta_tensor(self.parameters, self.method)
-        if self.method != "PM6":
+        if not has_d_orbitals(self.method):
             prepare_parameters(
                 self.parameters,
                 self.method,

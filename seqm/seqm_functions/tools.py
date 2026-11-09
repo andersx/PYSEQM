@@ -9,6 +9,7 @@ from .constants import overlap_cutoff
 from .diat_overlap_PM6_SP import diatom_overlap_matrix_PM6_SP
 from .diat_overlapD import diatom_overlap_matrixD
 from .two_elec_two_center_int import two_elec_two_center_int as TETCI
+from .method_utils import has_d_orbitals
 
 
 def get_hcore(molecule):
@@ -74,14 +75,14 @@ def hcore(const,nmol, molsize, maskd, mask, idxi, idxj, ni,nj,xij,rij, Z, zetas,
     #h1elec(idxi, idxj, ni, nj, xij, rij, zeta_a, zeta_b, beta, ispair=False) =>  beta_mu_nu
 
     #use uss upp to the diagonal block for hcore
-    if(themethod == 'PM6'):
+    if(has_d_orbitals(themethod)):
         zeta = torch.cat((zetas.unsqueeze(1), zetap.unsqueeze(1), zetad.unsqueeze(1)),dim=1)
     else:
         zeta = torch.cat((zetas.unsqueeze(1), zetap.unsqueeze(1)),dim=1)
     overlap_pairs = rij<=overlap_cutoff
     #di=th.zeros((npairs,4,4),dtype=dtype, device=device)
 
-    if(themethod == 'PM6'):
+    if(has_d_orbitals(themethod)):
         di = torch.zeros((xij.shape[0], 9, 9),dtype=dtype, device=device)
         di[overlap_pairs] = diatom_overlap_matrixD(ni[overlap_pairs],
                                    nj[overlap_pairs],
@@ -123,7 +124,7 @@ def hcore(const,nmol, molsize, maskd, mask, idxi, idxj, ni,nj,xij,rij, Z, zetas,
     #e1b, e2a shape (npairs, 10)
     #di shape (npairs,4,4), unit eV, core part for AO on different centers(atoms)
     ntotatoms = nmol * molsize
-    if(themethod == 'PM6'):
+    if(has_d_orbitals(themethod)):
         M = torch.zeros(nmol*molsize*molsize,9,9,dtype=dtype,device=device)
     else:
         M = torch.zeros(nmol*molsize*molsize,4,4,dtype=dtype,device=device)
@@ -136,7 +137,7 @@ def hcore(const,nmol, molsize, maskd, mask, idxi, idxj, ni,nj,xij,rij, Z, zetas,
     #t2 = torch.tensor([i*molsize**2 for i in range(nmol)],dtype=dtypeint,device=device).reshape((-1,1))
     #maskd = (t1+t2).reshape(-1) # mask for diagonal blocks
     #M[...,0,0].index_add_(0,maskd,uss)
-    if(themethod == 'PM6'):
+    if(has_d_orbitals(themethod)):
         M[maskd,0,0] = uss
         M[maskd,1,1] = upp
         M[maskd,2,2] = upp
@@ -202,7 +203,7 @@ def hcore(const,nmol, molsize, maskd, mask, idxi, idxj, ni,nj,xij,rij, Z, zetas,
     """
     #e1b, e2a are reshaped to be (...,4,4) in rotate.py
 
-    if(themethod == 'PM6'):
+    if(has_d_orbitals(themethod)):
         #di = di.transpose(1,2)
         #print(di)
         if torch.is_tensor(Kbeta):

@@ -51,6 +51,7 @@ from ..seqm_functions.fock import fock
 from ..seqm_functions.hcore import hcore
 from ..seqm_functions.pack import pack, unpack
 from .active_state import active_state_tensor
+from seqm.seqm_functions.method_utils import has_d_orbitals
 
 # number of iterations in canon_dm_prt.py (m)
 CANON_DM_PRT_ITER = 10
@@ -120,7 +121,7 @@ class EnergyXL(torch.nn.Module):
         )
 
         molecule.parameters["beta"] = build_beta_tensor(molecule.parameters, molecule.method)
-        if molecule.method != "PM6":
+        if not has_d_orbitals(molecule.method):
             prepare_parameters(
                 molecule.parameters,
                 molecule.method,
