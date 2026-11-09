@@ -200,66 +200,14 @@ def _add_betor_cor_dense_(out_blocks, S5, B5, molecule, gval1, COR, gval2, nbf):
 
 def _fill_dummy_d_channels(molecule, H_blocks, S_blocks, B_blocks, pair_overlap, pair_resonance, nbf):
     """
-    Fill s/p–d and d–d one-electron channels with dummy ζ_d / β_d overlaps.
-    DUMMY — not for production chemistry.
+    Placeholder for OM2+d off-diagonal d channels.
+
+    Until OM2 two-electron d integrals exist, do **not** inject β_d·S_d
+    resonance: that attraction without matching repulsion collapses bonds
+    (e.g. linear H2S, Cl–Cl ~0.7 Å). Diagonal U_dd is already set in
+    ``build_omx_hcore``. ζ_d / β_d remain available for a later TETCI stage.
     """
-    if nbf < 9:
-        return
-    from .diat_overlapD import diatom_overlap_matrixD
-    from .omx_utils import get_orbital_zeta_tensor
-
-    # Only needed when dummy zeta_d / beta_d are present.
-    params = molecule.parameters
-    if "zeta_d" not in params or "beta_d" not in params:
-        return
-    if not bool((params["zeta_d"].abs() > 0).any().item()):
-        return
-
-    # OM2 stores a single ζ for s/p; build (natoms, 3) = (ζ, ζ, ζ_d) for d-overlap.
-    if molecule.method in {"OM1", "OM2", "OM3"}:
-        z = params["zeta"]
-        zd = params.get("zeta_d", torch.zeros_like(z))
-        zeta = torch.stack([z, z, zd], dim=1)
-    else:
-        zeta = get_orbital_zeta_tensor(params, molecule.method, include_d=True)
-        if zeta.dim() == 1:
-            return
-        if zeta.shape[-1] < 3:
-            zeta = torch.nn.functional.pad(zeta, (0, 3 - zeta.shape[-1]))
-
-    idxi, idxj = molecule.idxi, molecule.idxj
-    ni, nj = molecule.ni, molecule.nj
-    xij, rij = molecule.xij, molecule.rij
-    qn = molecule.const.qn_int
-    qnD = molecule.const.qnD_int
-
-    di = diatom_overlap_matrixD(ni, nj, xij, rij, zeta[idxi], zeta[idxj], qn, qnD)
-    # Resonance ≈ 0.5 (βμ+βν) Sμν using beta_s/p/d
-    beta = params["beta"]
-    if beta.shape[-1] < 3:
-        beta = torch.nn.functional.pad(beta, (0, 3 - beta.shape[-1]))
-    layout = [0, 1, 1, 1, 2, 2, 2, 2, 2]
-    bi = beta[idxi][:, layout]
-    bj = beta[idxj][:, layout]
-    bsum = 0.5 * (bi.unsqueeze(2) + bj.unsqueeze(1))
-    res = di * bsum
-
-    # Only write d-involving blocks; keep existing OM2 sp block.
-    d_slice = slice(4, 9)
-    H_blocks[molecule.mask, d_slice, :] = res[:, d_slice, :]
-    H_blocks[molecule.mask, :, d_slice] = res[:, :, d_slice]
-    H_blocks[molecule.mask, :4, :4] = pair_resonance  # restore OM2 sp resonance
-
-    if S_blocks is not None:
-        S_blocks[molecule.mask, d_slice, :] = di[:, d_slice, :]
-        S_blocks[molecule.mask, :, d_slice] = di[:, :, d_slice]
-        S_blocks[molecule.mask, :4, :4] = pair_overlap
-        S_blocks[molecule.mask_l] = S_blocks[molecule.mask].transpose(-1, -2)
-    if B_blocks is not None:
-        B_blocks[molecule.mask, d_slice, :] = res[:, d_slice, :]
-        B_blocks[molecule.mask, :, d_slice] = res[:, :, d_slice]
-        B_blocks[molecule.mask, :4, :4] = pair_resonance
-        B_blocks[molecule.mask_l] = B_blocks[molecule.mask].transpose(-1, -2)
+    return
 
 
 def build_omx_hcore(molecule):

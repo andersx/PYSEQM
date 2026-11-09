@@ -1,0 +1,18 @@
+{
+  "source": "Thiel MNDO/d (parameters_MNDO_d_MOPAC.csv)",
+  "d_params": {
+    "U_dd": {
+      "16": -25.095118,
+      "17": -36.6745732
+    },
+    "zeta_d": {
+      "16": 1.2314725,
+      "17": 1.25139777
+    },
+    "beta_d": {
+      "16": -1.8806695,
+      "17": -1.87778198
+    }
+  },
+  "note": "INITIAL OM2+d d-params by literature transfer from MNDO/d. Not re-fit to DFT/exp geometries: OM2 9-AO path lacks two-electron d integrals and is not geometry-safe. Ort/ECP d-factors remain 0. Enable with seqm_parameters['om2_use_d']=True when integrating OM2 TETCI-d."
+}

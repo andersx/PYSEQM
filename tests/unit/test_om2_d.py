@@ -30,8 +30,8 @@ H2S = (
 OM2_WATER_ETOT = -361.58824223810245
 
 
-def _params():
-    return {
+def _params(**extra):
+    p = {
         "method": "OM2",
         "scf_eps": 1.0e-8,
         "scf_converger": [1],
@@ -42,12 +42,14 @@ def _params():
         "scf_backward": 0,
         "UHF": False,
     }
+    p.update(extra)
+    return p
 
 
-def _run(atoms, coords):
+def _run(atoms, coords, **extra):
     torch.set_default_dtype(torch.float64)
     const = Constants()
-    params = _params()
+    params = _params(**extra)
     molecule = Molecule(
         const,
         params,
@@ -65,9 +67,17 @@ def test_om2_water_hcno_regression():
     assert abs(mol.Etot.item() - OM2_WATER_ETOT) < 1e-8
 
 
-def test_om2_h2s_dummy_d_converges_with_finite_forces():
-    """S uses 9 AO with dummy MNDO/d-inspired d-params — smoke only, not MNDO99."""
+def test_om2_h2s_defaults_to_sp():
+    """om2_use_d defaults False until OM2 TETCI-d exists."""
     mol = _run(*H2S)
+    assert mol.nSuperHeavy.item() == 0
+    assert mol.norb.item() == 6
+    assert torch.isfinite(mol.Etot).all()
+
+
+def test_om2_h2s_opt_in_d_converges_with_finite_forces():
+    """Opt-in 9 AO path: converges; not a chemistry claim."""
+    mol = _run(*H2S, om2_use_d=True)
     assert mol.nSuperHeavy.item() == 1
     assert mol.norb.item() == 11
     assert torch.isfinite(mol.Etot).all()

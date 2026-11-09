@@ -359,6 +359,8 @@ class Parser(torch.nn.Module):
         self.elements = seqm_parameters["elements"]
         self.uhf = seqm_parameters.get("UHF", False)
         self.hipnn_automatic_doublet = seqm_parameters.get("HIPNN_automatic_doublet", False)
+        # Default False until OM2 two-electron d integrals exist; 9-AO OM2 is opt-in.
+        self.om2_use_d = seqm_parameters.get("om2_use_d", False)
 
     def forward(self, molecule, themethod, return_mask_l=False, do_large_tensors=True, *args, **kwargs):
         """
@@ -421,7 +423,11 @@ class Parser(torch.nn.Module):
             nHeavy = torch.sum((molecule.species > 1) & (~is_d), dim=1)
         elif themethod == "OM2":
             # OM2+d infrastructure: S/Cl use 9 AO with dummy d-params; HCNOF stay 4 AO.
-            is_d = (molecule.species == 16) | (molecule.species == 17)
+            # Set seqm_parameters["om2_use_d"]=False to force an sp-only baseline.
+            if self.om2_use_d:
+                is_d = (molecule.species == 16) | (molecule.species == 17)
+            else:
+                is_d = torch.zeros_like(molecule.species, dtype=torch.bool)
             nSuperHeavy = torch.sum(is_d, dim=1)
             nHeavy = torch.sum((molecule.species > 1) & (~is_d), dim=1)
         else:
